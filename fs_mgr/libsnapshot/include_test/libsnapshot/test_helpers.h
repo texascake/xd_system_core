@@ -95,6 +95,7 @@ class TestDeviceInfo : public SnapshotManager::IDeviceInfo {
         unbootable_slots_.insert(slot);
         return true;
     }
+    bool IsTestDevice() const override { return true; }
 
     bool IsSlotUnbootable(uint32_t slot) { return unbootable_slots_.count(slot) != 0; }
 
@@ -144,6 +145,7 @@ void DeleteBackingImage(android::fiemap::IImageManager* manager, const std::stri
 // Expect space of |path| is multiple of 4K.
 bool WriteRandomData(const std::string& path, std::optional<size_t> expect_size = std::nullopt,
                      std::string* hash = nullptr);
+bool WriteRandomData(ICowWriter* writer, std::string* hash = nullptr);
 
 std::optional<std::string> GetHash(const std::string& path);
 
@@ -179,6 +181,23 @@ class LowSpaceUserdata {
     uint64_t available_space_ = 0;
     uint64_t bsize_ = 0;
 };
+
+bool IsVirtualAbEnabled();
+
+#define SKIP_IF_NON_VIRTUAL_AB()                                                        \
+    do {                                                                                \
+        if (!IsVirtualAbEnabled()) GTEST_SKIP() << "Test for Virtual A/B devices only"; \
+    } while (0)
+
+#define RETURN_IF_NON_VIRTUAL_AB_MSG(msg) \
+    do {                                  \
+        if (!IsVirtualAbEnabled()) {      \
+            std::cerr << (msg);           \
+            return;                       \
+        }                                 \
+    } while (0)
+
+#define RETURN_IF_NON_VIRTUAL_AB() RETURN_IF_NON_VIRTUAL_AB_MSG("")
 
 }  // namespace snapshot
 }  // namespace android

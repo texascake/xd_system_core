@@ -15,6 +15,7 @@
 #include <libsnapshot/snapshot.h>
 
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -29,6 +30,7 @@
 #include <android-base/properties.h>
 #include <android-base/strings.h>
 #include <android-base/unique_fd.h>
+#include <fs_mgr/file_wait.h>
 #include <fs_mgr/roots.h>
 #include <fs_mgr_dm_linear.h>
 #include <gtest/gtest.h>
@@ -83,9 +85,7 @@ void MountMetadata();
 
 class SnapshotTest : public ::testing::Test {
   public:
-    SnapshotTest() : dm_(DeviceMapper::Instance()) {
-        is_virtual_ab_ = android::base::GetBoolProperty("ro.virtual_ab.enabled", false);
-    }
+    SnapshotTest() : dm_(DeviceMapper::Instance()) {}
 
     // This is exposed for main.
     void Cleanup() {
@@ -95,7 +95,7 @@ class SnapshotTest : public ::testing::Test {
 
   protected:
     void SetUp() override {
-        if (!is_virtual_ab_) GTEST_SKIP() << "Test for Virtual A/B devices only";
+        SKIP_IF_NON_VIRTUAL_AB();
 
         SnapshotTestPropertyFetcher::SetUp();
         InitializeState();
@@ -106,7 +106,7 @@ class SnapshotTest : public ::testing::Test {
     }
 
     void TearDown() override {
-        if (!is_virtual_ab_) return;
+        RETURN_IF_NON_VIRTUAL_AB();
 
         lock_ = nullptr;
 
@@ -119,6 +119,8 @@ class SnapshotTest : public ::testing::Test {
         image_manager_ = sm->image_manager();
 
         test_device->set_slot_suffix("_a");
+
+        sm->set_use_first_stage_snapuserd(false);
     }
 
     void CleanupTestArtifacts() {
@@ -266,7 +268,7 @@ class SnapshotTest : public ::testing::Test {
         if (!map_res) {
             return map_res;
         }
-        if (!InitializeCow(cow_device)) {
+        if (!InitializeKernelCow(cow_device)) {
             return AssertionFailure() << "Cannot zero fill " << cow_device;
         }
         if (!sm->UnmapCowImage(name)) {
@@ -341,7 +343,6 @@ class SnapshotTest : public ::testing::Test {
     }
 
     static constexpr std::chrono::milliseconds snapshot_timeout_ = 5s;
-    bool is_virtual_ab_;
     DeviceMapper& dm_;
     std::unique_ptr<SnapshotManager::LockedFile> lock_;
     android::fiemap::IImageManager* image_manager_ = nullptr;
@@ -722,11 +723,13 @@ class LockTestConsumer {
 class LockTest : public ::testing::Test {
   public:
     void SetUp() {
+        SKIP_IF_NON_VIRTUAL_AB();
         first_consumer.StartHandleRequestsInBackground();
         second_consumer.StartHandleRequestsInBackground();
     }
 
     void TearDown() {
+        RETURN_IF_NON_VIRTUAL_AB();
         EXPECT_TRUE(first_consumer.MakeRequest(Request::EXIT));
         EXPECT_TRUE(second_consumer.MakeRequest(Request::EXIT));
     }
@@ -770,7 +773,7 @@ INSTANTIATE_TEST_SUITE_P(
 class SnapshotUpdateTest : public SnapshotTest {
   public:
     void SetUp() override {
-        if (!is_virtual_ab_) GTEST_SKIP() << "Test for Virtual A/B devices only";
+        SKIP_IF_NON_VIRTUAL_AB();
 
         SnapshotTest::SetUp();
         Cleanup();
@@ -792,12 +795,15 @@ class SnapshotUpdateTest : public SnapshotTest {
         group_->add_partition_names("prd");
         sys_ = manifest_.add_partitions();
         sys_->set_partition_name("sys");
+        sys_->set_estimate_cow_size(6_MiB);
         SetSize(sys_, 3_MiB);
         vnd_ = manifest_.add_partitions();
         vnd_->set_partition_name("vnd");
+        vnd_->set_estimate_cow_size(6_MiB);
         SetSize(vnd_, 3_MiB);
         prd_ = manifest_.add_partitions();
         prd_->set_partition_name("prd");
+        prd_->set_estimate_cow_size(6_MiB);
         SetSize(prd_, 3_MiB);
 
         // Initialize source partition metadata using |manifest_|.
@@ -832,7 +838,7 @@ class SnapshotUpdateTest : public SnapshotTest {
         }
     }
     void TearDown() override {
-        if (!is_virtual_ab_) return;
+        RETURN_IF_NON_VIRTUAL_AB();
 
         Cleanup();
         SnapshotTest::TearDown();
@@ -893,42 +899,84 @@ class SnapshotUpdateTest : public SnapshotTest {
         return AssertionSuccess();
     }
 
-    AssertionResult MapUpdateSnapshot(const std::string& name, std::string* path = nullptr) {
-        std::string real_path;
-        if (!sm->MapUpdateSnapshot(
-                    CreateLogicalPartitionParams{
-                            .block_device = fake_super,
-                            .metadata_slot = 1,
-                            .partition_name = name,
-                            .timeout_ms = 10s,
-                            .partition_opener = opener_.get(),
-                    },
-                    &real_path)) {
-            return AssertionFailure() << "Unable to map snapshot " << name;
+    AssertionResult MapUpdateSnapshot(const std::string& name,
+                                      std::unique_ptr<ICowWriter>* writer) {
+        CreateLogicalPartitionParams params{
+                .block_device = fake_super,
+                .metadata_slot = 1,
+                .partition_name = name,
+                .timeout_ms = 10s,
+                .partition_opener = opener_.get(),
+        };
+
+        auto result = sm->OpenSnapshotWriter(params, {});
+        if (!result) {
+            return AssertionFailure() << "Cannot open snapshot for writing: " << name;
         }
-        if (path) {
-            *path = real_path;
+        if (!result->Initialize()) {
+            return AssertionFailure() << "Cannot initialize snapshot for writing: " << name;
         }
-        return AssertionSuccess() << "Mapped snapshot " << name << " to " << real_path;
+
+        if (writer) {
+            *writer = std::move(result);
+        }
+        return AssertionSuccess();
     }
 
-    AssertionResult WriteSnapshotAndHash(const std::string& name,
-                                         std::optional<size_t> size = std::nullopt) {
-        std::string path;
-        auto res = MapUpdateSnapshot(name, &path);
-        if (!res) {
-            return res;
+    AssertionResult MapUpdateSnapshot(const std::string& name, std::string* path) {
+        CreateLogicalPartitionParams params{
+                .block_device = fake_super,
+                .metadata_slot = 1,
+                .partition_name = name,
+                .timeout_ms = 10s,
+                .partition_opener = opener_.get(),
+        };
+
+        auto result = sm->MapUpdateSnapshot(params, path);
+        if (!result) {
+            return AssertionFailure() << "Cannot open snapshot for writing: " << name;
+        }
+        return AssertionSuccess();
+    }
+
+    AssertionResult MapUpdateSnapshot(const std::string& name) {
+        if (IsCompressionEnabled()) {
+            std::unique_ptr<ICowWriter> writer;
+            return MapUpdateSnapshot(name, &writer);
+        } else {
+            std::string path;
+            return MapUpdateSnapshot(name, &path);
+        }
+    }
+
+    AssertionResult WriteSnapshotAndHash(const std::string& name) {
+        if (IsCompressionEnabled()) {
+            std::unique_ptr<ICowWriter> writer;
+            auto res = MapUpdateSnapshot(name, &writer);
+            if (!res) {
+                return res;
+            }
+            if (!WriteRandomData(writer.get(), &hashes_[name])) {
+                return AssertionFailure() << "Unable to write random data to snapshot " << name;
+            }
+            if (!writer->Finalize()) {
+                return AssertionFailure() << "Unable to finalize COW for " << name;
+            }
+        } else {
+            std::string path;
+            auto res = MapUpdateSnapshot(name, &path);
+            if (!res) {
+                return res;
+            }
+            if (!WriteRandomData(path, std::nullopt, &hashes_[name])) {
+                return AssertionFailure() << "Unable to write random data to snapshot " << name;
+            }
         }
 
-        std::string size_string = size ? (std::to_string(*size) + " bytes") : "";
+        // Make sure updates to one device are seen by all devices.
+        sync();
 
-        if (!WriteRandomData(path, size, &hashes_[name])) {
-            return AssertionFailure() << "Unable to write " << size_string << " to " << path
-                                      << " for partition " << name;
-        }
-
-        return AssertionSuccess() << "Written " << size_string << " to " << path
-                                  << " for snapshot partition " << name
+        return AssertionSuccess() << "Written random data to snapshot " << name
                                   << ", hash: " << hashes_[name];
     }
 
@@ -999,12 +1047,16 @@ TEST_F(SnapshotUpdateTest, FullUpdateFlow) {
     auto tgt = MetadataBuilder::New(*opener_, "super", 1);
     ASSERT_NE(tgt, nullptr);
     ASSERT_NE(nullptr, tgt->FindPartition("sys_b-cow"));
-    ASSERT_NE(nullptr, tgt->FindPartition("vnd_b-cow"));
+    if (IsCompressionEnabled()) {
+        ASSERT_EQ(nullptr, tgt->FindPartition("vnd_b-cow"));
+    } else {
+        ASSERT_NE(nullptr, tgt->FindPartition("vnd_b-cow"));
+    }
     ASSERT_EQ(nullptr, tgt->FindPartition("prd_b-cow"));
 
     // Write some data to target partitions.
     for (const auto& name : {"sys_b", "vnd_b", "prd_b"}) {
-        ASSERT_TRUE(WriteSnapshotAndHash(name, partition_size));
+        ASSERT_TRUE(WriteSnapshotAndHash(name));
     }
 
     // Assert that source partitions aren't affected.
@@ -1365,13 +1417,17 @@ TEST_F(SnapshotUpdateTest, MergeCannotRemoveCow) {
     ASSERT_EQ(UpdateState::MergeCompleted, init->ProcessUpdateState());
 }
 
-class MetadataMountedTest : public SnapshotUpdateTest {
+class MetadataMountedTest : public ::testing::Test {
   public:
+    // This is so main() can instantiate this to invoke Cleanup.
+    virtual void TestBody() override {}
     void SetUp() override {
+        SKIP_IF_NON_VIRTUAL_AB();
         metadata_dir_ = test_device->GetMetadataDir();
         ASSERT_TRUE(ReadDefaultFstab(&fstab_));
     }
     void TearDown() override {
+        RETURN_IF_NON_VIRTUAL_AB();
         SetUp();
         // Remount /metadata
         test_device->set_recovery(false);
@@ -1620,7 +1676,7 @@ TEST_F(SnapshotUpdateTest, Hashtree) {
 
     // Map and write some data to target partition.
     ASSERT_TRUE(MapUpdateSnapshots({"vnd_b", "prd_b"}));
-    ASSERT_TRUE(WriteSnapshotAndHash("sys_b", partition_size));
+    ASSERT_TRUE(WriteSnapshotAndHash("sys_b"));
 
     // Finish update.
     ASSERT_TRUE(sm->FinishedSnapshotWrites(false));
@@ -1652,7 +1708,7 @@ TEST_F(SnapshotUpdateTest, Overflow) {
 
     // Map and write some data to target partitions.
     ASSERT_TRUE(MapUpdateSnapshots({"vnd_b", "prd_b"}));
-    ASSERT_TRUE(WriteSnapshotAndHash("sys_b", actual_write_size));
+    ASSERT_TRUE(WriteSnapshotAndHash("sys_b"));
 
     std::vector<android::dm::DeviceMapper::TargetInfo> table;
     ASSERT_TRUE(DeviceMapper::Instance().GetTableStatus("sys_b", &table));
@@ -1686,6 +1742,74 @@ TEST_F(SnapshotUpdateTest, LowSpace) {
     ASSERT_LT(res.required_size(), 15_MiB);
 }
 
+class AutoKill final {
+  public:
+    explicit AutoKill(pid_t pid) : pid_(pid) {}
+    ~AutoKill() {
+        if (pid_ > 0) kill(pid_, SIGKILL);
+    }
+
+    bool valid() const { return pid_ > 0; }
+
+  private:
+    pid_t pid_;
+};
+
+TEST_F(SnapshotUpdateTest, DaemonTransition) {
+    if (!IsCompressionEnabled()) {
+        GTEST_SKIP() << "Skipping Virtual A/B Compression test";
+    }
+
+    AutoKill auto_kill(StartFirstStageSnapuserd());
+    ASSERT_TRUE(auto_kill.valid());
+
+    // Ensure a connection to the second-stage daemon, but use the first-stage
+    // code paths thereafter.
+    ASSERT_TRUE(sm->EnsureSnapuserdConnected());
+    sm->set_use_first_stage_snapuserd(true);
+
+    AddOperationForPartitions();
+    // Execute the update.
+    ASSERT_TRUE(sm->BeginUpdate());
+    ASSERT_TRUE(sm->CreateUpdateSnapshots(manifest_));
+    ASSERT_TRUE(MapUpdateSnapshots());
+    ASSERT_TRUE(sm->FinishedSnapshotWrites(false));
+    ASSERT_TRUE(UnmapAll());
+
+    auto init = SnapshotManager::NewForFirstStageMount(new TestDeviceInfo(fake_super, "_b"));
+    ASSERT_NE(init, nullptr);
+
+    ASSERT_TRUE(init->EnsureSnapuserdConnected());
+    init->set_use_first_stage_snapuserd(true);
+
+    ASSERT_TRUE(init->NeedSnapshotsInFirstStageMount());
+    ASSERT_TRUE(init->CreateLogicalAndSnapshotPartitions("super", snapshot_timeout_));
+
+    ASSERT_EQ(access("/dev/dm-user/sys_b-user-cow-init", F_OK), 0);
+    ASSERT_EQ(access("/dev/dm-user/sys_b-user-cow", F_OK), -1);
+
+    ASSERT_TRUE(init->PerformSecondStageTransition());
+
+    // The control device should have been renamed.
+    ASSERT_TRUE(android::fs_mgr::WaitForFileDeleted("/dev/dm-user/sys_b-user-cow-init", 10s));
+    ASSERT_EQ(access("/dev/dm-user/sys_b-user-cow", F_OK), 0);
+}
+
+TEST_F(SnapshotUpdateTest, MapAllSnapshots) {
+    AddOperationForPartitions();
+    // Execute the update.
+    ASSERT_TRUE(sm->BeginUpdate());
+    ASSERT_TRUE(sm->CreateUpdateSnapshots(manifest_));
+    for (const auto& name : {"sys_b", "vnd_b", "prd_b"}) {
+        ASSERT_TRUE(WriteSnapshotAndHash(name));
+    }
+    ASSERT_TRUE(sm->FinishedSnapshotWrites(false));
+    ASSERT_TRUE(sm->MapAllSnapshots(10s));
+
+    // Read bytes back and verify they match the cache.
+    ASSERT_TRUE(IsPartitionUnchanged("sys_b"));
+}
+
 class FlashAfterUpdateTest : public SnapshotUpdateTest,
                              public WithParamInterface<std::tuple<uint32_t, bool>> {
   public:
@@ -1702,8 +1826,6 @@ class FlashAfterUpdateTest : public SnapshotUpdateTest,
 };
 
 TEST_P(FlashAfterUpdateTest, FlashSlotAfterUpdate) {
-    if (!is_virtual_ab_) GTEST_SKIP() << "Test for Virtual A/B devices only";
-
     // OTA client blindly unmaps all partitions that are possibly mapped.
     for (const auto& name : {"sys_b", "vnd_b", "prd_b"}) {
         ASSERT_TRUE(sm->UnmapUpdateSnapshot(name));
@@ -1803,14 +1925,13 @@ INSTANTIATE_TEST_SUITE_P(Snapshot, FlashAfterUpdateTest, Combine(Values(0, 1), B
 class ImageManagerTest : public SnapshotTest, public WithParamInterface<uint64_t> {
   protected:
     void SetUp() override {
-        if (!is_virtual_ab_) GTEST_SKIP() << "Test for Virtual A/B devices only";
-
+        SKIP_IF_NON_VIRTUAL_AB();
         SnapshotTest::SetUp();
         userdata_ = std::make_unique<LowSpaceUserdata>();
         ASSERT_TRUE(userdata_->Init(GetParam()));
     }
     void TearDown() override {
-        if (!is_virtual_ab_) return;
+        RETURN_IF_NON_VIRTUAL_AB();
         return;  // BUG(149738928)
 
         EXPECT_TRUE(!image_manager_->BackingImageExists(kImageName) ||
@@ -1852,11 +1973,6 @@ std::vector<uint64_t> ImageManagerTestParams() {
 
 INSTANTIATE_TEST_SUITE_P(ImageManagerTest, ImageManagerTest, ValuesIn(ImageManagerTestParams()));
 
-}  // namespace snapshot
-}  // namespace android
-
-using namespace android::snapshot;
-
 bool Mkdir(const std::string& path) {
     if (mkdir(path.c_str(), 0700) && errno != EEXIST) {
         std::cerr << "Could not mkdir " << path << ": " << strerror(errno) << std::endl;
@@ -1865,8 +1981,21 @@ bool Mkdir(const std::string& path) {
     return true;
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
+class SnapshotTestEnvironment : public ::testing::Environment {
+  public:
+    ~SnapshotTestEnvironment() override {}
+    void SetUp() override;
+    void TearDown() override;
+
+  private:
+    std::unique_ptr<IImageManager> super_images_;
+};
+
+void SnapshotTestEnvironment::SetUp() {
+    // b/163082876: GTEST_SKIP in Environment will make atest report incorrect results. Until
+    // that is fixed, don't call GTEST_SKIP here, but instead call GTEST_SKIP in individual test
+    // suites.
+    RETURN_IF_NON_VIRTUAL_AB_MSG("Virtual A/B is not enabled, skipping global setup.\n");
 
     std::vector<std::string> paths = {
             // clang-format off
@@ -1879,18 +2008,13 @@ int main(int argc, char** argv) {
             // clang-format on
     };
     for (const auto& path : paths) {
-        if (!Mkdir(path)) {
-            return 1;
-        }
+        ASSERT_TRUE(Mkdir(path));
     }
 
     // Create this once, otherwise, gsid will start/stop between each test.
     test_device = new TestDeviceInfo();
     sm = SnapshotManager::New(test_device);
-    if (!sm) {
-        std::cerr << "Could not create snapshot manager\n";
-        return 1;
-    }
+    ASSERT_NE(nullptr, sm) << "Could not create snapshot manager";
 
     // Clean up previous run.
     MetadataMountedTest().TearDown();
@@ -1898,31 +2022,35 @@ int main(int argc, char** argv) {
     SnapshotTest().Cleanup();
 
     // Use a separate image manager for our fake super partition.
-    auto super_images = IImageManager::Open("ota/test/super", 10s);
-    if (!super_images) {
-        std::cerr << "Could not create image manager\n";
-        return 1;
-    }
+    super_images_ = IImageManager::Open("ota/test/super", 10s);
+    ASSERT_NE(nullptr, super_images_) << "Could not create image manager";
 
     // Clean up any old copy.
-    DeleteBackingImage(super_images.get(), "fake-super");
+    DeleteBackingImage(super_images_.get(), "fake-super");
 
     // Create and map the fake super partition.
     static constexpr int kImageFlags =
             IImageManager::CREATE_IMAGE_DEFAULT | IImageManager::CREATE_IMAGE_ZERO_FILL;
-    if (!super_images->CreateBackingImage("fake-super", kSuperSize, kImageFlags)) {
-        std::cerr << "Could not create fake super partition\n";
-        return 1;
-    }
-    if (!super_images->MapImageDevice("fake-super", 10s, &fake_super)) {
-        std::cerr << "Could not map fake super partition\n";
-        return 1;
-    }
+    ASSERT_TRUE(super_images_->CreateBackingImage("fake-super", kSuperSize, kImageFlags))
+            << "Could not create fake super partition";
+
+    ASSERT_TRUE(super_images_->MapImageDevice("fake-super", 10s, &fake_super))
+            << "Could not map fake super partition";
     test_device->set_fake_super(fake_super);
+}
 
-    auto result = RUN_ALL_TESTS();
+void SnapshotTestEnvironment::TearDown() {
+    RETURN_IF_NON_VIRTUAL_AB();
+    if (super_images_ != nullptr) {
+        DeleteBackingImage(super_images_.get(), "fake-super");
+    }
+}
 
-    DeleteBackingImage(super_images.get(), "fake-super");
+}  // namespace snapshot
+}  // namespace android
 
-    return result;
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    ::testing::AddGlobalTestEnvironment(new ::android::snapshot::SnapshotTestEnvironment());
+    return RUN_ALL_TESTS();
 }

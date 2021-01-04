@@ -15,6 +15,7 @@
 #pragma once
 
 #include <libsnapshot/snapshot.h>
+#include <payload_consumer/file_descriptor.h>
 
 namespace android::snapshot {
 
@@ -35,6 +36,9 @@ class SnapshotManagerStub : public ISnapshotManager {
             const chromeos_update_engine::DeltaArchiveManifest& manifest) override;
     bool MapUpdateSnapshot(const android::fs_mgr::CreateLogicalPartitionParams& params,
                            std::string* snapshot_path) override;
+    std::unique_ptr<ISnapshotWriter> OpenSnapshotWriter(
+            const android::fs_mgr::CreateLogicalPartitionParams& params,
+            const std::optional<std::string>& source_device) override;
     bool UnmapUpdateSnapshot(const std::string& target_partition_name) override;
     bool NeedSnapshotsInFirstStageMount() override;
     bool CreateLogicalAndSnapshotPartitions(
@@ -48,6 +52,8 @@ class SnapshotManagerStub : public ISnapshotManager {
     bool Dump(std::ostream& os) override;
     std::unique_ptr<AutoDevice> EnsureMetadataMounted() override;
     ISnapshotMergeStats* GetSnapshotMergeStatsInstance() override;
+    bool MapAllSnapshots(const std::chrono::milliseconds& timeout_ms) override;
+    bool UnmapAllSnapshots() override;
 };
 
 }  // namespace android::snapshot

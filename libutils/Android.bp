@@ -16,6 +16,7 @@ cc_library_headers {
     name: "libutils_headers",
     vendor_available: true,
     recovery_available: true,
+    vendor_ramdisk_available: true,
     host_supported: true,
     native_bridge_supported: true,
     apex_available: [
@@ -43,7 +44,13 @@ cc_library_headers {
             header_libs: ["libbacktrace_headers"],
             export_header_lib_headers: ["libbacktrace_headers"],
         },
+        linux_glibc: {
+            header_libs: ["libbacktrace_headers"],
+            export_header_lib_headers: ["libbacktrace_headers"],
+        },
         linux_bionic: {
+            header_libs: ["libbacktrace_headers"],
+            export_header_lib_headers: ["libbacktrace_headers"],
             enabled: true,
         },
         windows: {
@@ -132,7 +139,6 @@ cc_library {
         "JenkinsHash.cpp",
         "NativeHandle.cpp",
         "Printer.cpp",
-        "PropertyMap.cpp",
         "RefBase.cpp",
         "SharedBuffer.cpp",
         "StopWatch.cpp",
@@ -205,6 +211,7 @@ cc_defaults {
     shared_libs: [
         "libutils",
         "libbase",
+        "liblog",
     ],
 }
 
@@ -236,6 +243,54 @@ cc_fuzz {
     name: "libutils_fuzz_vector",
     defaults: ["libutils_fuzz_defaults"],
     srcs: ["Vector_fuzz.cpp"],
+}
+
+cc_fuzz {
+    name: "libutils_fuzz_printer",
+    defaults: ["libutils_fuzz_defaults"],
+    srcs: ["Printer_fuzz.cpp"],
+}
+
+cc_fuzz {
+    name: "libutils_fuzz_callstack",
+    defaults: ["libutils_fuzz_defaults"],
+    srcs: ["CallStack_fuzz.cpp"],
+    shared_libs: [
+        "libutilscallstack",
+    ],
+}
+
+cc_fuzz {
+    name: "libutils_fuzz_process_callstack",
+    defaults: ["libutils_fuzz_defaults"],
+    srcs: ["ProcessCallStack_fuzz.cpp"],
+    shared_libs: [
+        "libutilscallstack",
+    ],
+}
+
+cc_fuzz {
+    name: "libutils_fuzz_stopwatch",
+    defaults: ["libutils_fuzz_defaults"],
+    srcs: ["StopWatch_fuzz.cpp"],
+}
+
+cc_fuzz {
+    name: "libutils_fuzz_refbase",
+    defaults: ["libutils_fuzz_defaults"],
+    srcs: ["RefBase_fuzz.cpp"],
+}
+
+cc_fuzz {
+    name: "libutils_fuzz_lrucache",
+    defaults: ["libutils_fuzz_defaults"],
+    srcs: ["LruCache_fuzz.cpp"],
+}
+
+cc_fuzz {
+    name: "libutils_fuzz_looper",
+    defaults: ["libutils_fuzz_defaults"],
+    srcs: ["Looper_fuzz.cpp"],
 }
 
 cc_test {

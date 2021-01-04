@@ -57,6 +57,7 @@
 #include <keyutils.h>
 #include <libavb/libavb.h>
 #include <libgsi/libgsi.h>
+#include <libsnapshot/snapshot.h>
 #include <private/android_filesystem_config.h>
 #include <processgroup/processgroup.h>
 #include <processgroup/setup.h>
@@ -76,6 +77,7 @@
 #include "proto_utils.h"
 #include "reboot.h"
 #include "reboot_utils.h"
+#include "second_stage_resources.h"
 #include "security.h"
 #include "selabel.h"
 #include "selinux.h"
@@ -98,6 +100,7 @@ using android::base::StringPrintf;
 using android::base::Timer;
 using android::base::Trim;
 using android::fs_mgr::AvbHandle;
+using android::snapshot::SnapshotManager;
 using android::fs_mgr::Fstab;
 using android::fs_mgr::ReadDefaultFstab;
 
@@ -325,14 +328,14 @@ static void LoadBootScripts(ActionManager& action_manager, ServiceList& service_
         // late_import is available only in Q and earlier release. As we don't
         // have system_ext in those versions, skip late_import for system_ext.
         parser.ParseConfig("/system_ext/etc/init");
-        if (!parser.ParseConfig("/product/etc/init")) {
-            late_import_paths.emplace_back("/product/etc/init");
+        if (!parser.ParseConfig("/vendor/etc/init")) {
+            late_import_paths.emplace_back("/vendor/etc/init");
         }
         if (!parser.ParseConfig("/odm/etc/init")) {
             late_import_paths.emplace_back("/odm/etc/init");
         }
-        if (!parser.ParseConfig("/vendor/etc/init")) {
-            late_import_paths.emplace_back("/vendor/etc/init");
+        if (!parser.ParseConfig("/product/etc/init")) {
+            late_import_paths.emplace_back("/product/etc/init");
         }
     } else {
         parser.ParseConfig(bootscript);
@@ -683,6 +686,12 @@ static void UmountDebugRamdisk() {
     }
 }
 
+static void UmountSecondStageRes() {
+    if (umount(kSecondStageRes) != 0) {
+        PLOG(ERROR) << "Failed to umount " << kSecondStageRes;
+    }
+}
+
 static void MountExtraFilesystems() {
 #define CHECKCALL(x) \
     if ((x) != 0) PLOG(FATAL) << #x " failed.";
@@ -728,6 +737,32 @@ void SendLoadPersistentPropertiesMessage() {
     if (auto result = SendMessage(property_fd, init_message); !result.ok()) {
         LOG(ERROR) << "Failed to send load persistent properties message: " << result.error();
     }
+}
+
+static Result<void> TransitionSnapuserdAction(const BuiltinArguments&) {
+    if (!SnapshotManager::IsSnapshotManagerNeeded() ||
+        !android::base::GetBoolProperty(android::snapshot::kVirtualAbCompressionProp, false)) {
+        return {};
+    }
+
+    auto sm = SnapshotManager::New();
+    if (!sm) {
+        LOG(FATAL) << "Failed to create SnapshotManager, will not transition snapuserd";
+        return {};
+    }
+
+    ServiceList& service_list = ServiceList::GetInstance();
+    auto svc = service_list.FindService("snapuserd");
+    if (!svc) {
+        LOG(FATAL) << "Failed to find snapuserd service, aborting transition";
+        return {};
+    }
+    svc->Start();
+
+    if (!sm->PerformSecondStageTransition()) {
+        LOG(FATAL) << "Failed to transition snapuserd to second-stage";
+    }
+    return {};
 }
 
 int SecondStageMain(int argc, char** argv) {
@@ -796,29 +831,6 @@ int SecondStageMain(int argc, char** argv) {
         load_debug_prop = "true"s == force_debuggable_env;
     }
 
-    // Set memcg property based on kernel cmdline argument
-    bool memcg_enabled = android::base::GetBoolProperty("ro.boot.memcg",false);
-    if (memcg_enabled) {
-       // root memory control cgroup
-       mkdir("/dev/memcg", 0755);
-       chown("/dev/memcg",AID_SYSTEM,AID_SYSTEM);
-       mount("none", "/dev/memcg", "cgroup", 0, "memory");
-       // app mem cgroups, used by activity manager, lmkd and zygote
-       mkdir("/dev/memcg/apps/",0755);
-       chown("/dev/memcg/apps/",AID_SYSTEM,AID_SYSTEM);
-       mkdir("/dev/memcg/system",0550);
-       chown("/dev/memcg/system",AID_SYSTEM,AID_SYSTEM);
-       if (auto result = WriteFile("/dev/memcg/memory.swappiness", "100"); !result) {
-           LOG(ERROR) << "Unable to write 100 to /dev/memcg/memory.swappiness" << result.error();
-       }
-       if (auto result = WriteFile("/dev/memcg/apps/memory.swappiness", "100"); !result) {
-           LOG(ERROR) << "Unable to write 100 to /dev/memcg/memory.swappiness" << result.error();
-       }
-       if (auto result = WriteFile("/dev/memcg/system/memory.swappiness", "100"); !result) {
-           LOG(ERROR) << "Unable to write 100 to /dev/memcg/memory.swappiness" << result.error();
-       }
-
-    }
     unsetenv("INIT_FORCE_DEBUGGABLE");
 
     // Umount the debug ramdisk so property service doesn't read .prop files from there, when it
@@ -828,6 +840,9 @@ int SecondStageMain(int argc, char** argv) {
     }
 
     PropertyInit();
+
+    // Umount second stage resources after property service has read the .prop files.
+    UmountSecondStageRes();
 
     // Umount the debug ramdisk after property service has read the .prop files when it means to.
     if (load_debug_prop) {
@@ -890,6 +905,7 @@ int SecondStageMain(int argc, char** argv) {
     SetProperty(gsi::kGsiInstalledProp, is_installed);
 
     am.QueueBuiltinAction(SetupCgroupsAction, "SetupCgroups");
+    am.QueueBuiltinAction(TransitionSnapuserdAction, "TransitionSnapuserd");
     am.QueueBuiltinAction(SetKptrRestrictAction, "SetKptrRestrict");
     am.QueueBuiltinAction(TestPerfEventSelinuxAction, "TestPerfEventSelinux");
     am.QueueEventTrigger("early-init");
