@@ -61,34 +61,36 @@ class BufferSink : public IByteSink {
 
 class Snapuserd final {
   public:
-    bool InitBackingAndControlDevice(std::string& backing_device, std::string& control_device);
-    bool InitCowDevice(std::string& cow_device);
-    int Run();
+    Snapuserd(const std::string& misc_name, const std::string& cow_device,
+              const std::string& backing_device);
+    bool InitBackingAndControlDevice();
+    bool InitCowDevice();
+    bool Run();
     const std::string& GetControlDevicePath() { return control_device_; }
-    const std::string& GetCowDevice() { return cow_device_; }
+    const std::string& GetMiscName() { return misc_name_; }
     uint64_t GetNumSectors() { return num_sectors_; }
+    bool IsAttached() const { return ctrl_fd_ >= 0; }
 
   private:
-    int ReadDmUserHeader();
+    bool ReadDmUserHeader();
     bool ReadDmUserPayload(void* buffer, size_t size);
-    int WriteDmUserPayload(size_t size);
-    int ConstructKernelCowHeader();
+    bool WriteDmUserPayload(size_t size);
+    void ConstructKernelCowHeader();
     bool ReadMetadata();
-    int ZerofillDiskExceptions(size_t read_size);
-    int ReadDiskExceptions(chunk_t chunk, size_t size);
-    int ReadData(chunk_t chunk, size_t size);
+    bool ZerofillDiskExceptions(size_t read_size);
+    bool ReadDiskExceptions(chunk_t chunk, size_t size);
+    bool ReadData(chunk_t chunk, size_t size);
     bool IsChunkIdMetadata(chunk_t chunk);
-    chunk_t GetNextAllocatableChunkId(chunk_t chunk);
+    chunk_t GetNextAllocatableChunkId(chunk_t chunk_id);
 
-    int ProcessReplaceOp(const CowOperation* cow_op);
-    int ProcessCopyOp(const CowOperation* cow_op);
-    int ProcessZeroOp();
+    bool ProcessReplaceOp(const CowOperation* cow_op);
+    bool ProcessCopyOp(const CowOperation* cow_op);
+    bool ProcessZeroOp();
 
     loff_t GetMergeStartOffset(void* merged_buffer, void* unmerged_buffer,
                                int* unmerged_exceptions);
     int GetNumberOfMergedOps(void* merged_buffer, void* unmerged_buffer, loff_t offset,
-                             int unmerged_exceptions);
-    bool AdvanceMergedOps(int merged_ops_cur_iter);
+                             int unmerged_exceptions, bool* copy_op);
     bool ProcessMergeComplete(chunk_t chunk, void* buffer);
     sector_t ChunkToSector(chunk_t chunk) { return chunk << CHUNK_SHIFT; }
     chunk_t SectorToChunk(sector_t sector) { return sector >> CHUNK_SHIFT; }
@@ -96,6 +98,7 @@ class Snapuserd final {
     std::string cow_device_;
     std::string backing_store_device_;
     std::string control_device_;
+    std::string misc_name_;
 
     unique_fd cow_fd_;
     unique_fd backing_store_fd_;
