@@ -26,7 +26,8 @@
       "Path": "/dev/memcg",
       "Mode": "0755",
       "UID": "system",
-      "GID": "system"
+      "GID": "system",
+      "Optional": true
     }
   ],
   "Cgroups2": {
@@ -37,7 +38,7 @@
     "Controllers": [
       {
         "Controller": "freezer",
-        "Path": "freezer",
+        "Path": ".",
         "Mode": "0755",
         "UID": "system",
         "GID": "system"

@@ -252,6 +252,7 @@ on init
     chmod 0664 /dev/blkio/background/tasks
     write /dev/blkio/blkio.weight 1000
     write /dev/blkio/background/blkio.weight 200
+    write /dev/blkio/background/blkio.bfq.weight 10
     write /dev/blkio/blkio.group_idle 0
     write /dev/blkio/background/blkio.group_idle 0
 
@@ -485,6 +486,9 @@ on init
     chmod 0664 /sys/module/lowmemorykiller/parameters/minfree
     start lmkd
 
+    # Set an initial boot level - start at 10 in case we need to add earlier ones.
+    setprop keystore.boot_level 10
+
     # Start essential services.
     start servicemanager
     start hwservicemanager
@@ -633,7 +637,19 @@ on late-fs
     # Load trusted keys from dm-verity protected partitions
     exec -- /system/bin/fsverity_init --load-verified-keys
 
+    # Set up a tracing instance for system_server to monitor error_report_end events.
+    # These are sent by kernel tools like KASAN and KFENCE when a memory corruption
+    # is detected.
+    mkdir /sys/kernel/tracing/instances/bootreceiver 0700 system system
+    restorecon_recursive /sys/kernel/tracing/instances/bootreceiver
+    write /sys/kernel/tracing/instances/bootreceiver/buffer_size_kb 1
+    write /sys/kernel/tracing/instances/bootreceiver/trace_options disable_on_free
+    write /sys/kernel/tracing/instances/bootreceiver/events/error_report/error_report_end/enable 1
+
 on post-fs-data
+    # Boot level 30 - at this point daemons like apexd and odsign run
+    setprop keystore.boot_level 30
+
     mark_post_data
 
     # Start checkpoint before we touch data
@@ -676,6 +692,7 @@ on post-fs-data
     mkdir /data/apex/hashtree 0700 root system
     mkdir /data/apex/sessions 0700 root system
     mkdir /data/app-staging 0751 system system encryption=DeleteIfNecessary
+    mkdir /data/apex/ota_reserved 0700 root system encryption=Require
     start apexd
 
     # Avoid predictable entropy pool. Carry over entropy from previous boot.
@@ -821,6 +838,9 @@ on post-fs-data
     mkdir /data/ss 0700 system system encryption=Require
 
     mkdir /data/system 0775 system system encryption=Require
+    mkdir /data/system/environ 0700 system system
+    # b/183861600 attempt to fix selinux label before running derive_classpath service
+    restorecon /data/system/environ
     mkdir /data/system/dropbox 0700 system system
     mkdir /data/system/heapdump 0700 system system
     mkdir /data/system/users 0775 system system
@@ -896,9 +916,20 @@ on post-fs-data
     # Set SELinux security contexts on upgrade or policy update.
     restorecon --recursive --skip-ce /data
 
+    # Define and export *CLASSPATH variables
+    # Must start before 'odsign', as odsign depends on *CLASSPATH variables
+    exec_start derive_classpath
+    load_exports /data/system/environ/classpath
+    rm /data/system/environ/classpath
+
     # Start the on-device signing daemon, and wait for it to finish, to ensure
     # ART artifacts are generated if needed.
-    exec_start odsign
+    # Must start after 'derive_classpath' to have *CLASSPATH variables set.
+    start odsign
+
+    # Before we can lock keys and proceed to the next boot stage, wait for
+    # odsign to be done with the key
+    wait_for_prop odsign.key.done 1
 
     # After apexes are mounted, tell keymaster early boot has ended, so it will
     # stop allowing use of early-boot keys
@@ -906,6 +937,8 @@ on post-fs-data
 
     # Lock the fs-verity keyring, so no more keys can be added
     exec -- /system/bin/fsverity_init --lock
+
+    setprop keystore.boot_level 40
 
     # Allow apexd to snapshot and restore device encrypted apex data in the case
     # of a rollback. This should be done immediately after DE_user data keys
@@ -938,6 +971,7 @@ on post-fs-data
 # It is recommended to put unnecessary data/ initialization from post-fs-data
 # to start-zygote in device's init.rc to unblock zygote start.
 on zygote-start && property:ro.crypto.state=unencrypted
+    wait_for_prop odsign.verification.done 1
     # A/B update verifier that marks a successful boot.
     exec_start update_verifier_nonencrypted
     start statsd
@@ -946,6 +980,7 @@ on zygote-start && property:ro.crypto.state=unencrypted
     start zygote_secondary
 
 on zygote-start && property:ro.crypto.state=unsupported
+    wait_for_prop odsign.verification.done 1
     # A/B update verifier that marks a successful boot.
     exec_start update_verifier_nonencrypted
     start statsd
@@ -954,6 +989,7 @@ on zygote-start && property:ro.crypto.state=unsupported
     start zygote_secondary
 
 on zygote-start && property:ro.crypto.state=encrypted && property:ro.crypto.type=file
+    wait_for_prop odsign.verification.done 1
     # A/B update verifier that marks a successful boot.
     exec_start update_verifier_nonencrypted
     start statsd
@@ -1068,7 +1104,7 @@ on boot
     chown root radio /proc/cmdline
 
     # Define default initial receive window size in segments.
-    setprop net.tcp.default_init_rwnd 60
+    setprop net.tcp_def_init_rwnd 60
 
     # Start standard binderized HAL daemons
     class_start hal
@@ -1132,6 +1168,11 @@ on property:sys.boot_completed=1
 # So proxy writes through init.
 on property:sys.sysctl.extra_free_kbytes=*
     write /proc/sys/vm/extra_free_kbytes ${sys.sysctl.extra_free_kbytes}
+
+# Allow users to drop caches
+on property:perf.drop_caches=3
+    write /proc/sys/vm/drop_caches 3
+    setprop perf.drop_caches 0
 
 # "tcp_default_init_rwnd" Is too long!
 on property:net.tcp_def_init_rwnd=*

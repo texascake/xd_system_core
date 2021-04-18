@@ -102,8 +102,9 @@ void FreeRamdisk(DIR* dir, dev_t dev) {
     }
 }
 
-bool ForceNormalBoot(const std::string& cmdline) {
-    return cmdline.find("androidboot.force_normal_boot=1") != std::string::npos;
+bool ForceNormalBoot(const std::string& cmdline, const std::string& bootconfig) {
+    return bootconfig.find("androidboot.force_normal_boot = \"1\"") != std::string::npos ||
+           cmdline.find("androidboot.force_normal_boot=1") != std::string::npos;
 }
 
 }  // namespace
@@ -122,7 +123,7 @@ std::string GetModuleLoadList(bool recovery, const std::string& dir_path) {
 }
 
 #define MODULE_BASE_DIR "/lib/modules"
-bool LoadKernelModules(bool recovery, bool want_console) {
+bool LoadKernelModules(bool recovery, bool want_console, int& modules_loaded) {
     struct utsname uts;
     if (uname(&uts)) {
         LOG(FATAL) << "Failed to get kernel version.";
@@ -164,7 +165,7 @@ bool LoadKernelModules(bool recovery, bool want_console) {
         dir_path.append(module_dir);
         Modprobe m({dir_path}, GetModuleLoadList(recovery, dir_path));
         bool retval = m.LoadListedModules(!want_console);
-        int modules_loaded = m.GetModuleCount();
+        modules_loaded = m.GetModuleCount();
         if (modules_loaded > 0) {
             return retval;
         }
@@ -172,7 +173,7 @@ bool LoadKernelModules(bool recovery, bool want_console) {
 
     Modprobe m({MODULE_BASE_DIR}, GetModuleLoadList(recovery, MODULE_BASE_DIR));
     bool retval = m.LoadListedModules(!want_console);
-    int modules_loaded = m.GetModuleCount();
+    modules_loaded = m.GetModuleCount();
     if (modules_loaded > 0) {
         return retval;
     }
@@ -209,6 +210,10 @@ int FirstStageMain(int argc, char** argv) {
     CHECKCALL(chmod("/proc/cmdline", 0440));
     std::string cmdline;
     android::base::ReadFileToString("/proc/cmdline", &cmdline);
+    // Don't expose the raw bootconfig to unprivileged processes.
+    chmod("/proc/bootconfig", 0440);
+    std::string bootconfig;
+    android::base::ReadFileToString("/proc/bootconfig", &bootconfig);
     gid_t groups[] = {AID_READPROC};
     CHECKCALL(setgroups(arraysize(groups), groups));
     CHECKCALL(mount("sysfs", "/sys", "sysfs", 0, NULL));
@@ -276,17 +281,35 @@ int FirstStageMain(int argc, char** argv) {
         old_root_dir.reset();
     }
 
-    auto want_console = ALLOW_FIRST_STAGE_CONSOLE ? FirstStageConsole(cmdline) : 0;
+    auto want_console = ALLOW_FIRST_STAGE_CONSOLE ? FirstStageConsole(cmdline, bootconfig) : 0;
 
-    if (!LoadKernelModules(IsRecoveryMode() && !ForceNormalBoot(cmdline), want_console)) {
+    boot_clock::time_point module_start_time = boot_clock::now();
+    int module_count = 0;
+    if (!LoadKernelModules(IsRecoveryMode() && !ForceNormalBoot(cmdline, bootconfig), want_console,
+                           module_count)) {
         if (want_console != FirstStageConsoleParam::DISABLED) {
             LOG(ERROR) << "Failed to load kernel modules, starting console";
         } else {
             LOG(FATAL) << "Failed to load kernel modules";
         }
     }
+    if (module_count > 0) {
+        auto module_elapse_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                boot_clock::now() - module_start_time);
+        setenv(kEnvInitModuleDurationMs, std::to_string(module_elapse_time.count()).c_str(), 1);
+        LOG(INFO) << "Loaded " << module_count << " kernel modules took "
+                  << module_elapse_time.count() << " ms";
+    }
 
+
+    bool created_devices = false;
     if (want_console == FirstStageConsoleParam::CONSOLE_ON_FAILURE) {
+        if (!IsRecoveryMode()) {
+            created_devices = DoCreateDevices();
+            if (!created_devices){
+                LOG(ERROR) << "Failed to create device nodes early";
+            }
+        }
         StartConsole(cmdline);
     }
 
@@ -304,7 +327,7 @@ int FirstStageMain(int argc, char** argv) {
         LOG(INFO) << "Copied ramdisk prop to " << dest;
     }
 
-    if (ForceNormalBoot(cmdline)) {
+    if (ForceNormalBoot(cmdline, bootconfig)) {
         mkdir("/first_stage_ramdisk", 0755);
         // SwitchRoot() must be called with a mount point as the target, so we bind mount the
         // target directory to itself here.
@@ -314,12 +337,21 @@ int FirstStageMain(int argc, char** argv) {
         SwitchRoot("/first_stage_ramdisk");
     }
 
+    std::string force_debuggable("/force_debuggable");
+    std::string adb_debug_prop("/adb_debug.prop");
+    std::string userdebug_sepolicy("/userdebug_plat_sepolicy.cil");
+    if (IsRecoveryMode()) {
+        // Update these file paths since we didn't switch root
+        force_debuggable.insert(0, "/first_stage_ramdisk");
+        adb_debug_prop.insert(0, "/first_stage_ramdisk");
+        userdebug_sepolicy.insert(0, "/first_stage_ramdisk");
+    }
     // If this file is present, the second-stage init will use a userdebug sepolicy
     // and load adb_debug.prop to allow adb root, if the device is unlocked.
-    if (access("/force_debuggable", F_OK) == 0) {
+    if (access(force_debuggable.c_str(), F_OK) == 0) {
         std::error_code ec;  // to invoke the overloaded copy_file() that won't throw.
-        if (!fs::copy_file("/adb_debug.prop", kDebugRamdiskProp, ec) ||
-            !fs::copy_file("/userdebug_plat_sepolicy.cil", kDebugRamdiskSEPolicy, ec)) {
+        if (!fs::copy_file(adb_debug_prop, kDebugRamdiskProp, ec) ||
+            !fs::copy_file(userdebug_sepolicy, kDebugRamdiskSEPolicy, ec)) {
             LOG(ERROR) << "Failed to setup debug ramdisk";
         } else {
             // setenv for second-stage init to read above kDebugRamdisk* files.
@@ -327,7 +359,7 @@ int FirstStageMain(int argc, char** argv) {
         }
     }
 
-    if (!DoFirstStageMount()) {
+    if (!DoFirstStageMount(!created_devices)) {
         LOG(FATAL) << "Failed to mount required partitions early ...";
     }
 
@@ -345,6 +377,7 @@ int FirstStageMain(int argc, char** argv) {
 
     setenv(kEnvFirstStageStartedAt, std::to_string(start_time.time_since_epoch().count()).c_str(),
            1);
+    LOG(INFO) << "init first stage completed!";
 
     const char* path = "/system/bin/init";
     const char* args[] = {path, "selinux_setup", nullptr};

@@ -533,11 +533,9 @@ static void export_oem_lock_status() {
     if (!android::base::GetBoolProperty("ro.oem_unlock_supported", false)) {
         return;
     }
-    ImportKernelCmdline([](const std::string& key, const std::string& value) {
-        if (key == "androidboot.verifiedbootstate") {
-            SetProperty("ro.boot.flash.locked", value == "orange" ? "0" : "1");
-        }
-    });
+    SetProperty(
+            "ro.boot.flash.locked",
+            android::base::GetProperty("ro.boot.verifiedbootstate", "") == "orange" ? "0" : "1");
 }
 
 static Result<void> property_enable_triggers_action(const BuiltinArguments& args) {
@@ -728,6 +726,10 @@ static void RecordStageBoottimes(const boot_clock::time_point& second_stage_star
     SetProperty("ro.boottime.init.selinux",
                 std::to_string(second_stage_start_time.time_since_epoch().count() -
                                selinux_start_time_ns));
+    if (auto init_module_time_str = getenv(kEnvInitModuleDurationMs); init_module_time_str) {
+        SetProperty("ro.boottime.init.modules", init_module_time_str);
+        unsetenv(kEnvInitModuleDurationMs);
+    }
 }
 
 void SendLoadPersistentPropertiesMessage() {
@@ -889,7 +891,9 @@ int SecondStageMain(int argc, char** argv) {
      */
     auto api_level = android::base::GetIntProperty("ro.product.first_api_level", 0);
     bool is_debuggable = android::base::GetBoolProperty("ro.debuggable", false);
-    auto mount_debugfs = (is_debuggable && (api_level >= 31)) ? "1" : "0";
+    bool first_api_level_override = android::base::GetBoolProperty("debug.mount_debugfs", false);
+    auto mount_debugfs =
+            (is_debuggable && ((api_level >= 31) || first_api_level_override)) ? "1" : "0";
     SetProperty("init.mount_debugfs", mount_debugfs);
 
     am.QueueBuiltinAction(SetupCgroupsAction, "SetupCgroups");
