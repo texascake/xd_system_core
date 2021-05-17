@@ -1279,7 +1279,7 @@ static std::string RemapEmulatorPropertyName(const std::string_view qemu_key) {
     } else if (qemu_key == "media.ccodec"sv) {
         return "debug.stagefright.ccodec"s;
     } else {
-        return ""s;  // TBD
+        return "qemu."s + std::string(qemu_key);
     }
 }
 
@@ -1290,8 +1290,6 @@ static void ProcessKernelCmdline() {
         if (StartsWith(key, ANDROIDBOOT_PREFIX)) {
             InitPropertySet("ro.boot." + key.substr(ANDROIDBOOT_PREFIX.size()), value);
         } else if (StartsWith(key, qemu_prefix)) {
-            InitPropertySet("ro.kernel." + key, value);  // emulator specific, deprecated
-
             // emulator specific, should be retired once emulator migrates to
             // androidboot.
             const auto new_name =
@@ -1303,6 +1301,22 @@ static void ProcessKernelCmdline() {
             // emulator specific, should be retired once emulator migrates to
             // androidboot.
             InitPropertySet("ro.boot." + key, value);
+        } else if (key == "android.bootanim" && value == "0") {
+            // emulator specific, should be retired once emulator migrates to
+            // androidboot.
+            InitPropertySet("ro.boot.debug.sf.nobootanimation", "1");
+        } else if (key == "android.checkjni") {
+            // emulator specific, should be retired once emulator migrates to
+            // androidboot.
+            std::string value_bool;
+            if (value == "0") {
+                value_bool = "false";
+            } else if (value == "1") {
+                value_bool = "true";
+            } else {
+                value_bool = value;
+            }
+            InitPropertySet("ro.boot.dalvik.vm.checkjni", value_bool);
         }
     });
 }

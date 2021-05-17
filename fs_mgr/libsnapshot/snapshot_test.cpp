@@ -676,6 +676,18 @@ TEST_F(SnapshotTest, UpdateBootControlHal) {
     ASSERT_EQ(test_device->merge_status(), MergeStatus::MERGING);
 }
 
+TEST_F(SnapshotTest, MergeFailureCode) {
+    ASSERT_TRUE(AcquireLock());
+
+    ASSERT_TRUE(sm->WriteUpdateState(lock_.get(), UpdateState::MergeFailed,
+                                     MergeFailureCode::ListSnapshots));
+    ASSERT_EQ(test_device->merge_status(), MergeStatus::MERGING);
+
+    SnapshotUpdateStatus status = sm->ReadSnapshotUpdateStatus(lock_.get());
+    ASSERT_EQ(status.state(), UpdateState::MergeFailed);
+    ASSERT_EQ(status.merge_failure_code(), MergeFailureCode::ListSnapshots);
+}
+
 enum class Request { UNKNOWN, LOCK_SHARED, LOCK_EXCLUSIVE, UNLOCK, EXIT };
 std::ostream& operator<<(std::ostream& os, Request request) {
     switch (request) {
@@ -2019,6 +2031,8 @@ TEST_F(SnapshotUpdateTest, MapAllSnapshots) {
 
     // Read bytes back and verify they match the cache.
     ASSERT_TRUE(IsPartitionUnchanged("sys_b"));
+
+    ASSERT_TRUE(sm->UnmapAllSnapshots());
 }
 
 TEST_F(SnapshotUpdateTest, CancelOnTargetSlot) {
