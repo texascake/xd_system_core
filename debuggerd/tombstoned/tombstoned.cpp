@@ -165,7 +165,8 @@ class CrashQueue {
 
     switch (dump_type) {
       case kDebuggerdNativeBacktrace:
-        // Don't generate tombstones for native backtrace requests.
+      case kDebuggerdJavaBacktrace:
+        // Don't generate tombstones for backtrace requests.
         return {};
 
       case kDebuggerdTombstoneProto:
@@ -177,7 +178,6 @@ class CrashQueue {
         result.text = create_temporary_file();
         break;
 
-      case kDebuggerdJavaBacktrace:
       case kDebuggerdTombstone:
         result.text = create_temporary_file();
         break;

@@ -31,7 +31,6 @@ cc_library_static {
 
     stl: "libc++_static",
     apex_available: [
-        "//apex_available:platform",
         "com.android.runtime",
     ],
 

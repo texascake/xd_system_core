@@ -94,9 +94,8 @@ class ISnapshotManager {
     // Dependency injection for testing.
     class IDeviceInfo {
       public:
-        using IImageManager = android::fiemap::IImageManager;
-
         virtual ~IDeviceInfo() {}
+        virtual std::string GetGsidDir() const = 0;
         virtual std::string GetMetadataDir() const = 0;
         virtual std::string GetSlotSuffix() const = 0;
         virtual std::string GetOtherSlotSuffix() const = 0;
@@ -108,11 +107,6 @@ class ISnapshotManager {
         virtual bool SetSlotAsUnbootable(unsigned int slot) = 0;
         virtual bool IsRecovery() const = 0;
         virtual bool IsTestDevice() const { return false; }
-        virtual bool IsFirstStageInit() const = 0;
-        virtual std::unique_ptr<IImageManager> OpenImageManager() const = 0;
-
-        // Helper method for implementing OpenImageManager.
-        std::unique_ptr<IImageManager> OpenImageManager(const std::string& gsid_dir) const;
     };
     virtual ~ISnapshotManager() = default;
 
@@ -426,6 +420,7 @@ class SnapshotManager final : public ISnapshotManager {
     bool EnsureSnapuserdConnected();
 
     // Helpers for first-stage init.
+    bool ForceLocalImageManager();
     const std::unique_ptr<IDeviceInfo>& device() const { return device_; }
 
     // Helper functions for tests.
@@ -770,6 +765,7 @@ class SnapshotManager final : public ISnapshotManager {
     std::string metadata_dir_;
     std::unique_ptr<IDeviceInfo> device_;
     std::unique_ptr<IImageManager> images_;
+    bool has_local_image_manager_ = false;
     bool use_first_stage_snapuserd_ = false;
     bool in_factory_data_reset_ = false;
     std::function<bool(const std::string&)> uevent_regen_callback_;

@@ -22,6 +22,7 @@ namespace android::snapshot {
 
 class MockDeviceInfo : public SnapshotManager::IDeviceInfo {
   public:
+    MOCK_METHOD(std::string, GetGsidDir, (), (const, override));
     MOCK_METHOD(std::string, GetMetadataDir, (), (const, override));
     MOCK_METHOD(std::string, GetSlotSuffix, (), (const, override));
     MOCK_METHOD(std::string, GetOtherSlotSuffix, (), (const, override));
@@ -31,9 +32,6 @@ class MockDeviceInfo : public SnapshotManager::IDeviceInfo {
     MOCK_METHOD(bool, SetBootControlMergeStatus, (MergeStatus status), (override));
     MOCK_METHOD(bool, SetSlotAsUnbootable, (unsigned int slot), (override));
     MOCK_METHOD(bool, IsRecovery, (), (const, override));
-    MOCK_METHOD(bool, IsFirstStageInit, (), (const, override));
-    MOCK_METHOD(std::unique_ptr<android::fiemap::IImageManager>, OpenImageManager, (),
-                (const, override));
 };
 
 }  // namespace android::snapshot

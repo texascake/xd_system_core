@@ -403,7 +403,6 @@ class SnapshotTest : public ::testing::Test {
     }
 
     std::unique_ptr<SnapshotManager> NewManagerForFirstStageMount(TestDeviceInfo* info) {
-        info->set_first_stage_init(true);
         auto init = SnapshotManager::NewForFirstStageMount(info);
         if (!init) {
             return nullptr;

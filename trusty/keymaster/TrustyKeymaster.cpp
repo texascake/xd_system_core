@@ -14,9 +14,7 @@
  * limitations under the License.
  */
 
-#define LOG_TAG "trusty_keymaster_hal"
-#include <android-base/logging.h>
-
+#include <cutils/log.h>
 #include <keymaster/android_keymaster_messages.h>
 #include <keymaster/keymaster_configuration.h>
 #include <trusty_keymaster/TrustyKeymaster.h>
@@ -24,28 +22,24 @@
 
 namespace keymaster {
 
-int TrustyKeymaster::Initialize(KmVersion version) {
+int TrustyKeymaster::Initialize() {
     int err;
-
-    LOG(INFO) << "Initializing TrustyKeymaster as KmVersion: " << (int)version;
 
     err = trusty_keymaster_connect();
     if (err) {
-        LOG(ERROR) << "Failed to connect to trusty keymaster (1st try)" << err;
+        ALOGE("Failed to connect to trusty keymaster %d", err);
         return err;
     }
 
     // Try GetVersion2 first.
     GetVersion2Request versionReq;
-    versionReq.max_message_version = MessageVersion(version);
     GetVersion2Response versionRsp = GetVersion2(versionReq);
     if (versionRsp.error != KM_ERROR_OK) {
-        LOG(WARNING) << "TA appears not to support GetVersion2, falling back (err = "
-                     << versionRsp.error << ")";
+        ALOGW("TA appears not to support GetVersion2, falling back (err = %d)", versionRsp.error);
 
         err = trusty_keymaster_connect();
         if (err) {
-            LOG(FATAL) << "Failed to connect to trusty keymaster (2nd try) " << err;
+            ALOGE("Failed to connect to trusty keymaster %d", err);
             return err;
         }
 
@@ -53,13 +47,13 @@ int TrustyKeymaster::Initialize(KmVersion version) {
         GetVersionResponse versionRsp;
         GetVersion(versionReq, &versionRsp);
         if (versionRsp.error != KM_ERROR_OK) {
-            LOG(FATAL) << "Failed to get TA version " << versionRsp.error;
+            ALOGE("Failed to get TA version %d", versionRsp.error);
             return -1;
         } else {
             keymaster_error_t error;
             message_version_ = NegotiateMessageVersion(versionRsp, &error);
             if (error != KM_ERROR_OK) {
-                LOG(FATAL) << "Failed to negotiate message version " << error;
+                ALOGE("Failed to negotiate message version %d", error);
                 return -1;
             }
         }
@@ -75,7 +69,7 @@ int TrustyKeymaster::Initialize(KmVersion version) {
     Configure(req, &rsp);
 
     if (rsp.error != KM_ERROR_OK) {
-        LOG(FATAL) << "Failed to configure keymaster " << rsp.error;
+        ALOGE("Failed to configure keymaster %d", rsp.error);
         return -1;
     }
 
@@ -93,7 +87,7 @@ static void ForwardCommand(enum keymaster_command command, const KeymasterMessag
     keymaster_error_t err;
     err = trusty_keymaster_send(command, req, rsp);
     if (err != KM_ERROR_OK) {
-        LOG(ERROR) << "Cmd " << command << " returned error: " << err;
+        ALOGE("Failed to send cmd %d err: %d", command, err);
         rsp->error = err;
     }
 }
@@ -143,19 +137,14 @@ void TrustyKeymaster::Configure(const ConfigureRequest& request, ConfigureRespon
 
 void TrustyKeymaster::GenerateKey(const GenerateKeyRequest& request,
                                   GenerateKeyResponse* response) {
-    if (message_version_ < 4) {
-        // Pre-KeyMint we need to add TAG_CREATION_DATETIME if not provided by the caller.
-        GenerateKeyRequest datedRequest(request.message_version);
-        datedRequest.key_description = request.key_description;
+    GenerateKeyRequest datedRequest(request.message_version);
+    datedRequest.key_description = request.key_description;
 
-        if (!request.key_description.Contains(TAG_CREATION_DATETIME)) {
-            datedRequest.key_description.push_back(TAG_CREATION_DATETIME, java_time(time(NULL)));
-        }
-
-        ForwardCommand(KM_GENERATE_KEY, datedRequest, response);
-    } else {
-        ForwardCommand(KM_GENERATE_KEY, request, response);
+    if (!request.key_description.Contains(TAG_CREATION_DATETIME)) {
+        datedRequest.key_description.push_back(TAG_CREATION_DATETIME, java_time(time(NULL)));
     }
+
+    ForwardCommand(KM_GENERATE_KEY, datedRequest, response);
 }
 
 void TrustyKeymaster::GetKeyCharacteristics(const GetKeyCharacteristicsRequest& request,
@@ -237,18 +226,6 @@ VerifyAuthorizationResponse TrustyKeymaster::VerifyAuthorization(
 GetVersion2Response TrustyKeymaster::GetVersion2(const GetVersion2Request& request) {
     GetVersion2Response response(message_version());
     ForwardCommand(KM_GET_VERSION_2, request, &response);
-    return response;
-}
-
-EarlyBootEndedResponse TrustyKeymaster::EarlyBootEnded() {
-    EarlyBootEndedResponse response(message_version());
-    ForwardCommand(KM_EARLY_BOOT_ENDED, EarlyBootEndedRequest(message_version()), &response);
-    return response;
-}
-
-DeviceLockedResponse TrustyKeymaster::DeviceLocked(const DeviceLockedRequest& request) {
-    DeviceLockedResponse response(message_version());
-    ForwardCommand(KM_DEVICE_LOCKED, request, &response);
     return response;
 }
 

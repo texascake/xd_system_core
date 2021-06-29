@@ -99,7 +99,6 @@ class BufferSink : public IByteSink {
     struct dm_user_header* GetHeaderPtr();
     bool ReturnData(void*, size_t) override { return true; }
     void ResetBufferOffset() { buffer_offset_ = 0; }
-    void* GetPayloadBufPtr();
 
   private:
     std::unique_ptr<uint8_t[]> buffer_;
@@ -172,7 +171,7 @@ class WorkerThread {
     bool DmuserReadRequest();
     bool DmuserWriteRequest();
     bool ReadDmUserPayload(void* buffer, size_t size);
-    bool WriteDmUserPayload(size_t size, bool header_response);
+    bool WriteDmUserPayload(size_t size);
 
     bool ReadDiskExceptions(chunk_t chunk, size_t size);
     bool ZerofillDiskExceptions(size_t read_size);
